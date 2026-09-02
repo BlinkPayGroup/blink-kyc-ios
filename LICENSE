@@ -1,0 +1,12 @@
+Blink KYC iOS SDK — Proprietary License
+
+Copyright (c) Blink. All rights reserved.
+
+This software and its accompanying documentation ("the SDK") are proprietary.
+Use of the SDK is permitted solely by parties holding a valid Blink KYC integration agreement, and
+only to integrate with the Blink KYC service. You may not copy, modify, distribute, sublicense,
+reverse-engineer, or attempt to derive the underlying verification methods, models, or algorithms,
+except as expressly permitted in writing by Blink.
+
+THE SDK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND. See your integration agreement for
+warranties, support, and liability terms.
