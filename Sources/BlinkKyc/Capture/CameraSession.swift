@@ -12,6 +12,7 @@ import AVFoundation
 import CoreImage
 import SwiftUI
 import UIKit
+import Vision
 
 /// Owns one `AVCaptureSession` for a single camera position. Produces JPEG stills on demand and keeps
 /// the latest video frame available for liveness capture.
@@ -29,6 +30,22 @@ final class BlinkCameraSession: NSObject {
     private var configured = false
     private var latestBuffer: CVPixelBuffer?
     private var photoContinuation: CheckedContinuation<Data, Error>?
+
+    /// What the frame stream should analyse for the auto-capture UX. A framing aid only — the server
+    /// still judges the captured media. Nothing here encodes a verification threshold or model of ours
+    /// (face detection is Apple's Vision framework, shipped with iOS).
+    enum AnalysisMode { case none, document, face }
+
+    /// Set by the capture screens to receive on-device framing signals on the main queue.
+    var analysisMode: AnalysisMode = .none
+    /// (documentPresent, tooFar) — a card fills the guide / is visible but small.
+    var onDocSignal: ((Bool, Bool) -> Void)?
+    /// (faceFits) — a single face is centred and large enough to fill the oval.
+    var onFaceSignal: ((Bool) -> Void)?
+
+    private var frameCounter = 0
+    private var faceInFlight = false
+    private let faceSequence = VNSequenceRequestHandler()
 
     init(position: AVCaptureDevice.Position) {
         self.position = position
@@ -200,6 +217,107 @@ extension BlinkCameraSession: AVCaptureVideoDataOutputSampleBufferDelegate {
         stateLock.lock()
         latestBuffer = pixelBuffer
         stateLock.unlock()
+
+        // Throttle analysis to a few frames per second — enough for a responsive lock-on without
+        // burning the CPU on every frame.
+        frameCounter &+= 1
+        switch analysisMode {
+        case .none:
+            return
+        case .document:
+            if frameCounter % 6 != 0 { return }
+            let (present, tooFar) = Self.documentSignal(from: pixelBuffer)
+            DispatchQueue.main.async { [weak self] in self?.onDocSignal?(present, tooFar) }
+        case .face:
+            if frameCounter % 6 != 0 || faceInFlight { return }
+            faceInFlight = true
+            detectFace(in: pixelBuffer)
+        }
+    }
+
+    /// Apple's Vision face detector → does one face fill the oval? Vision ships with iOS; the SDK
+    /// bundles no face model of its own.
+    private func detectFace(in pixelBuffer: CVPixelBuffer) {
+        let request = VNDetectFaceRectanglesRequest { [weak self] request, _ in
+            guard let self else { return }
+            self.faceInFlight = false
+            let faces = (request.results as? [VNFaceObservation]) ?? []
+            var fit = false
+            if let face = faces.first {
+                // Vision boundingBox is normalised, origin bottom-left. Centre + fill test.
+                let box = face.boundingBox
+                let cx = box.midX
+                let cy = box.midY
+                let centred = abs(cx - 0.5) < 0.22 && abs(cy - 0.5) < 0.24
+                let bigEnough = box.height > 0.34
+                fit = faces.count == 1 && centred && bigEnough
+            }
+            DispatchQueue.main.async { self.onFaceSignal?(fit) }
+        }
+        do {
+            try faceSequence.perform([request], on: pixelBuffer)
+        } catch {
+            faceInFlight = false
+        }
+    }
+
+    /// Edge-density + contrast over a card-shaped ROI of the BGRA frame — the same shape of test the
+    /// Web SDK runs. Returns (present, tooFar).
+    private static func documentSignal(from pixelBuffer: CVPixelBuffer) -> (Bool, Bool) {
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pixelBuffer) else { return (false, false) }
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(pixelBuffer)
+        if width < 16 || height < 16 { return (false, false) }
+        let ptr = base.assumingMemoryBound(to: UInt8.self)
+
+        // BGRA: use the green channel as a cheap luma proxy.
+        func lum(_ x: Int, _ y: Int) -> Int {
+            let cx = min(max(x, 0), width - 1)
+            let cy = min(max(y, 0), height - 1)
+            return Int(ptr[cy * bytesPerRow + cx * 4 + 1])
+        }
+
+        let roiW = Int(Double(width) * 0.84)
+        let roiH = min(Int(Double(roiW) / 1.586), Int(Double(height) * 0.84))
+        let left = (width - roiW) / 2
+        let top = (height - roiH) / 2
+        let cols = 24
+        let rows = 16
+        let edgeStep = 18
+        var interiorSum = 0
+        var interiorN = 0
+        var edgePx = 0
+        for r in 0 ..< rows {
+            let py = top + roiH * r / (rows - 1)
+            var prev = -1
+            for c in 0 ... cols {
+                let px = left + roiW * c / cols
+                let v = lum(px, py)
+                interiorSum += v
+                interiorN += 1
+                if prev >= 0 && abs(v - prev) >= edgeStep { edgePx += 1 }
+                prev = v
+            }
+        }
+        let pad = max(6, roiW / 40)
+        var ringSum = 0
+        var ringN = 0
+        for c in 0 ... cols {
+            let px = left + roiW * c / cols
+            ringSum += lum(px, top - pad)
+            ringSum += lum(px, top + roiH + pad)
+            ringN += 2
+        }
+        let edgeDensity = interiorN > 0 ? Double(edgePx) / Double(interiorN) : 0
+        let interiorMean = interiorN > 0 ? Double(interiorSum) / Double(interiorN) : 0
+        let ringMean = ringN > 0 ? Double(ringSum) / Double(ringN) : 0
+        let contrast = abs(interiorMean - ringMean)
+        let present = edgeDensity > 0.012 && contrast > 10
+        let tooFar = !present && edgeDensity >= 0.006 && edgeDensity <= 0.012
+        return (present, tooFar)
     }
 }
 
@@ -235,6 +353,12 @@ struct BlinkGuideOverlay: View {
 
     let kind: Kind
     let accent: Color
+    /// Green "locked on" framing while a document/face is detected steady.
+    var matched: Bool = false
+    /// Auto-capture / fit countdown, 0...1 — drives the ring drawn along the guide.
+    var progress: Double = 0
+
+    private var lockGreen: Color { Color(red: 0.13, green: 0.77, blue: 0.37) }
 
     var body: some View {
         ZStack {
@@ -242,7 +366,13 @@ struct BlinkGuideOverlay: View {
                 .fill(Color.black.opacity(0.45))
                 .reverseMask { GuideCutout(kind: kind) }
             GuideCutout(kind: kind)
-                .stroke(accent, style: StrokeStyle(lineWidth: 3, lineJoin: .round))
+                .stroke(matched ? lockGreen : accent,
+                        style: StrokeStyle(lineWidth: matched ? 4 : 3, lineJoin: .round))
+            if progress > 0 {
+                GuideCutout(kind: kind)
+                    .trim(from: 0, to: max(0, min(progress, 1)))
+                    .stroke(lockGreen, style: StrokeStyle(lineWidth: 4, lineCap: .round, lineJoin: .round))
+            }
         }
         .allowsHitTesting(false)
     }

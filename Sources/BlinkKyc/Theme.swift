@@ -46,11 +46,17 @@ public struct BlinkTheme {
 public struct BlinkStrings {
     public var documentTitle: String
     public var documentHint: String
+    public var documentHintFar: String
+    public var documentHintHold: String
+    public var documentHintManual: String
     public var captureButton: String
+    public var autoCaptureOn: String
+    public var autoCaptureOff: String
     public var retake: String
     public var use: String
     public var livenessTitle: String
     public var livenessHint: String
+    public var livenessHintFit: String
     public var startButton: String
     public var granting: String
     public var cameraDenied: String
@@ -58,12 +64,18 @@ public struct BlinkStrings {
     public var cancel: String
 
     public init(documentTitle: String = "Scan your document",
-                documentHint: String = "Fit the document inside the frame, then capture.",
+                documentHint: String = "Point the camera at your ID and hold steady.",
+                documentHintFar: String = "Move closer so the document fills the frame.",
+                documentHintHold: String = "Hold steady…",
+                documentHintManual: String = "Fit the document inside the frame, then capture.",
                 captureButton: String = "Capture",
+                autoCaptureOn: String = "Auto-capture: on",
+                autoCaptureOff: String = "Auto-capture: off",
                 retake: String = "Retake",
                 use: String = "Use photo",
                 livenessTitle: String = "Liveness check",
-                livenessHint: String = "Follow the prompts. Keep your face inside the circle.",
+                livenessHint: String = "Fit your face inside the oval.",
+                livenessHintFit: String = "Great — hold still, this starts automatically.",
                 startButton: String = "Start",
                 granting: String = "Requesting camera…",
                 cameraDenied: String = "Camera access is required to continue.",
@@ -71,11 +83,17 @@ public struct BlinkStrings {
                 cancel: String = "Cancel") {
         self.documentTitle = documentTitle
         self.documentHint = documentHint
+        self.documentHintFar = documentHintFar
+        self.documentHintHold = documentHintHold
+        self.documentHintManual = documentHintManual
         self.captureButton = captureButton
+        self.autoCaptureOn = autoCaptureOn
+        self.autoCaptureOff = autoCaptureOff
         self.retake = retake
         self.use = use
         self.livenessTitle = livenessTitle
         self.livenessHint = livenessHint
+        self.livenessHintFit = livenessHintFit
         self.startButton = startButton
         self.granting = granting
         self.cameraDenied = cameraDenied

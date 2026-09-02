@@ -1,6 +1,6 @@
 Pod::Spec.new do |s|
   s.name             = 'BlinkKyc'
-  s.version          = '1.1.0'
+  s.version          = '1.2.0'
   s.summary          = 'Blink KYC — drop-in identity verification for iOS.'
   s.description      = <<-DESC
     Drop-in identity verification for iOS. Your backend mints a session; the SDK runs the capture

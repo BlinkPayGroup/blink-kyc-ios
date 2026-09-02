@@ -24,12 +24,19 @@ final class LivenessCaptureModel: ObservableObject {
     @Published var phase: Phase = .granting
     @Published var prompt: String = ""
     @Published var actionIndex: Int = 0
+    @Published var matched = false
+    @Published var progress: Double = 0
 
     let camera = BlinkCameraSession(position: .front)
     let actions: [String]
     private let onFinish: (Result<[Data], Error>) -> Void
     private var frames: [Data] = []
     private var finished = false
+    private var fitSince: Date?
+
+    // Face held in the oval before the challenge auto-starts; brief dropouts tolerated.
+    private let fitDwellSeconds: TimeInterval = 0.9
+    private let graceSeconds: TimeInterval = 0.3
 
     /// The server may send an empty action list; fall back to a single "look straight" prompt.
     private var effectiveActions: [String] {
@@ -47,6 +54,8 @@ final class LivenessCaptureModel: ObservableObject {
         Task {
             let authorized = await BlinkCameraSession.ensureAuthorized()
             if authorized {
+                camera.onFaceSignal = { [weak self] fit in self?.handleFace(fit: fit) }
+                camera.analysisMode = .face
                 camera.start()
                 phase = .ready
             } else {
@@ -56,11 +65,32 @@ final class LivenessCaptureModel: ObservableObject {
     }
 
     func onDisappear() {
+        camera.analysisMode = .none
         camera.stop()
+    }
+
+    private func handleFace(fit: Bool) {
+        guard phase == .ready else { return }
+        let now = Date()
+        if fit {
+            if fitSince == nil { fitSince = now }
+            matched = true
+            let held = now.timeIntervalSince(fitSince ?? now)
+            progress = min(1, held / fitDwellSeconds)
+            if held >= fitDwellSeconds { fitSince = nil; start() }
+        } else {
+            if let since = fitSince, now.timeIntervalSince(since) < graceSeconds { return }
+            fitSince = nil
+            matched = false
+            progress = 0
+        }
     }
 
     func start() {
         guard phase == .ready else { return }
+        camera.analysisMode = .none
+        matched = true
+        progress = 0
         phase = .running
         Task { await runSequence() }
     }
@@ -240,12 +270,16 @@ struct LivenessCaptureScreen: View {
         .onDisappear { model.onDisappear() }
     }
 
+    private var liveHint: String {
+        (model.phase == .ready && model.matched) ? strings.livenessHintFit : strings.livenessHint
+    }
+
     private var header: some View {
         VStack(spacing: 4) {
             Text(strings.livenessTitle)
                 .font(.headline)
                 .foregroundColor(theme.resolvedText)
-            Text(strings.livenessHint)
+            Text(liveHint)
                 .font(.subheadline)
                 .foregroundColor(theme.resolvedText.opacity(0.75))
                 .multilineTextAlignment(.center)
@@ -269,7 +303,8 @@ struct LivenessCaptureScreen: View {
                         .padding(.horizontal, 24)
                 default:
                     BlinkCameraPreview(session: model.camera.captureSession)
-                    BlinkGuideOverlay(kind: .circle, accent: theme.resolvedAccent)
+                    BlinkGuideOverlay(kind: .circle, accent: theme.resolvedAccent,
+                                      matched: model.matched, progress: model.progress)
                     if !model.prompt.isEmpty {
                         VStack {
                             Text(model.prompt)

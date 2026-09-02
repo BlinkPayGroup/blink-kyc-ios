@@ -21,10 +21,20 @@ final class DocumentCaptureModel: ObservableObject {
     }
 
     @Published var phase: Phase = .granting
+    @Published var matched = false
+    @Published var tooFar = false
+    @Published var progress: Double = 0
+    @Published var autoEnabled = true
 
     let camera = BlinkCameraSession(position: .back)
     private let onFinish: (Result<Data, Error>) -> Void
     private var finished = false
+    private var capturing = false
+    private var stableSince: Date?
+
+    // Steady time before the shutter fires, and how long a brief detection dropout is tolerated.
+    private let holdSeconds: TimeInterval = 1.1
+    private let graceSeconds: TimeInterval = 0.25
 
     init(onFinish: @escaping (Result<Data, Error>) -> Void) {
         self.onFinish = onFinish
@@ -34,6 +44,10 @@ final class DocumentCaptureModel: ObservableObject {
         Task {
             let authorized = await BlinkCameraSession.ensureAuthorized()
             if authorized {
+                camera.onDocSignal = { [weak self] present, near in
+                    self?.handleSignal(present: present, near: near)
+                }
+                camera.analysisMode = autoEnabled ? .document : .none
                 camera.start()
                 phase = .live
             } else {
@@ -43,21 +57,57 @@ final class DocumentCaptureModel: ObservableObject {
     }
 
     func onDisappear() {
+        camera.analysisMode = .none
         camera.stop()
     }
 
+    private func handleSignal(present: Bool, near: Bool) {
+        guard phase == .live, autoEnabled, !capturing else { return }
+        let now = Date()
+        if present {
+            if stableSince == nil { stableSince = now }
+            matched = true
+            tooFar = false
+            let held = now.timeIntervalSince(stableSince ?? now)
+            progress = min(1, held / holdSeconds)
+            if held >= holdSeconds { stableSince = nil; capture() }
+        } else {
+            if let since = stableSince, now.timeIntervalSince(since) < graceSeconds, near { return }
+            stableSince = nil
+            matched = false
+            tooFar = near
+            progress = 0
+        }
+    }
+
+    func toggleAuto() {
+        autoEnabled.toggle()
+        camera.analysisMode = autoEnabled ? .document : .none
+        if !autoEnabled { matched = false; progress = 0; stableSince = nil }
+    }
+
     func capture() {
+        guard !capturing else { return }
+        capturing = true
+        progress = 0
+        camera.analysisMode = .none
         Task {
             do {
                 let data = try await camera.capturePhoto()
+                matched = false
                 phase = .review(data)
             } catch {
                 finish(.failure(error))
             }
+            capturing = false
         }
     }
 
     func retake() {
+        stableSince = nil
+        matched = false
+        progress = 0
+        camera.analysisMode = autoEnabled ? .document : .none
         phase = .live
     }
 
@@ -114,12 +164,19 @@ struct DocumentCaptureScreen: View {
         .onDisappear { model.onDisappear() }
     }
 
+    private var docHint: String {
+        if !model.autoEnabled { return strings.documentHintManual }
+        if model.matched { return strings.documentHintHold }
+        if model.tooFar { return strings.documentHintFar }
+        return strings.documentHint
+    }
+
     private var header: some View {
         VStack(spacing: 4) {
             Text(strings.documentTitle)
                 .font(.headline)
                 .foregroundColor(theme.resolvedText)
-            Text(strings.documentHint)
+            Text(docHint)
                 .font(.subheadline)
                 .foregroundColor(theme.resolvedText.opacity(0.75))
                 .multilineTextAlignment(.center)
@@ -143,7 +200,8 @@ struct DocumentCaptureScreen: View {
                     deniedView
                 case .live:
                     BlinkCameraPreview(session: model.camera.captureSession)
-                    BlinkGuideOverlay(kind: .card, accent: theme.resolvedAccent)
+                    BlinkGuideOverlay(kind: .card, accent: theme.resolvedAccent,
+                                      matched: model.matched, progress: model.progress)
                 case .review(let data):
                     if let image = UIImage(data: data) {
                         Image(uiImage: image)
@@ -178,7 +236,14 @@ struct DocumentCaptureScreen: View {
     private var controls: some View {
         switch model.phase {
         case .live:
-            BlinkPrimaryButton(title: strings.captureButton, theme: theme) { model.capture() }
+            VStack(spacing: 10) {
+                Button(action: { model.toggleAuto() }) {
+                    Text(model.autoEnabled ? strings.autoCaptureOn : strings.autoCaptureOff)
+                        .font(.footnote)
+                        .foregroundColor(theme.resolvedText.opacity(0.85))
+                }
+                BlinkPrimaryButton(title: strings.captureButton, theme: theme) { model.capture() }
+            }
         case .review(let data):
             HStack(spacing: 12) {
                 BlinkGhostButton(title: strings.retake, theme: theme) { model.retake() }
