@@ -1,0 +1,14 @@
+name: build
+on: [push, pull_request]
+jobs:
+  ios:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
+      - name: Build for iOS Simulator (type-checks the UIKit capture UI)
+        run: |
+          set -o pipefail
+          xcodebuild -resolvePackageDependencies
+          xcodebuild build -scheme BlinkKyc -destination 'generic/platform=iOS Simulator'
