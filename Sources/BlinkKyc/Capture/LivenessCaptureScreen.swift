@@ -71,15 +71,47 @@ final class LivenessCaptureModel: ObservableObject {
 
     private func runSequence() async {
         let list = effectiveActions
+
+        // 1) Primary frontal frame — a settled "look straight" still, grabbed BEFORE any gesture so
+        //    it is sharp and front-facing rather than a mid-motion blur. This is the frame scored for
+        //    quality; grab a few candidates and keep the sharpest.
+        prompt = Self.humanAction("LOOK_STRAIGHT")
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        if let frame = await grabSharpest(candidates: 3, gapNanos: 220_000_000) {
+            frames.append(frame)
+        }
+
+        // 2) A short two-frame burst per requested action supplies the inter-frame motion a live
+        //    capture must show. Budget the per-action count so the total stays within the wire limit.
+        let perAction = max(1, min(2, (11 - frames.count) / max(list.count, 1)))
         for (index, action) in list.enumerated() {
+            if frames.count >= 12 { break }
             actionIndex = index
             prompt = Self.humanAction(action)
             // Give the user a moment to perform the action, then grab a frame.
-            try? await Task.sleep(nanoseconds: 1_100_000_000)
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
             if let frame = await awaitFrame() {
                 frames.append(frame)
             }
+            if perAction > 1 && frames.count < 12 {
+                try? await Task.sleep(nanoseconds: 420_000_000)
+                if let frame = await awaitFrame() {
+                    frames.append(frame)
+                }
+            }
         }
+
+        // 3) Guarantee at least 3 frames with motion even for a degenerate single-action challenge.
+        while frames.count < 3 {
+            prompt = Self.humanAction("MOVE_CLOSER")
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            if let frame = await awaitFrame() {
+                frames.append(frame)
+            } else {
+                break
+            }
+        }
+
         prompt = "✓"
         phase = .done
 
@@ -89,6 +121,57 @@ final class LivenessCaptureModel: ObservableObject {
         }
         // Cap to the wire limit (max 12 frames).
         finish(.success(Array(frames.prefix(12))))
+    }
+
+    /// Grab several settled frames and keep the sharpest — the primary frame the verifier scores.
+    /// Falls back to a single grab if sharpness metrics are unavailable on this platform.
+    private func grabSharpest(candidates: Int, gapNanos: UInt64) async -> Data? {
+        var best: Data?
+        var bestSharp = -Double.greatestFiniteMagnitude
+        for i in 0 ..< max(candidates, 1) {
+            guard let frame = await awaitFrame() else { continue }
+            let sharp = Self.sharpness(of: frame)
+            if sharp > bestSharp {
+                bestSharp = sharp
+                best = frame
+            }
+            if i < candidates - 1 {
+                try? await Task.sleep(nanoseconds: gapNanos)
+            }
+        }
+        return best
+    }
+
+    /// Cheap focus proxy (higher = sharper): variance of a downscaled luma Laplacian. On-device
+    /// capture guidance only — an SDK-local heuristic that mirrors no server measurement.
+    private static func sharpness(of jpeg: Data) -> Double {
+        guard let image = UIImage(data: jpeg), let cg = image.cgImage else { return 0 }
+        let w = 48
+        let h = 48
+        var pixels = [UInt8](repeating: 0, count: w * h)
+        guard let ctx = CGContext(data: &pixels,
+                                  width: w, height: h,
+                                  bitsPerComponent: 8, bytesPerRow: w,
+                                  space: CGColorSpaceCreateDeviceGray(),
+                                  bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return 0 }
+        ctx.draw(cg, in: CGRect(x: 0, y: 0, width: w, height: h))
+        var sum = 0.0
+        var sumSq = 0.0
+        var count = 0.0
+        for y in 1 ..< (h - 1) {
+            for x in 1 ..< (w - 1) {
+                let i = y * w + x
+                let lap = 4.0 * Double(pixels[i])
+                    - Double(pixels[i - 1]) - Double(pixels[i + 1])
+                    - Double(pixels[i - w]) - Double(pixels[i + w])
+                sum += lap
+                sumSq += lap * lap
+                count += 1
+            }
+        }
+        guard count > 0 else { return 0 }
+        let mean = sum / count
+        return sumSq / count - mean * mean
     }
 
     /// Wait briefly for a frame to be available (frames flow shortly after the session starts).
@@ -117,6 +200,7 @@ final class LivenessCaptureModel: ObservableObject {
         case "LOOK_STRAIGHT": return "Look straight ahead"
         case "SMILE": return "Smile"
         case "NOD": return "Nod"
+        case "MOVE_CLOSER": return "Move a little closer"
         default:
             return action.replacingOccurrences(of: "_", with: " ").lowercased()
         }
