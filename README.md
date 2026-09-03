@@ -28,7 +28,7 @@ Your backend ◀── GET /api/blink/session/{id}/result ── the AUTHORITATI
 In Xcode: *File ▸ Add Package Dependencies…* and point at this repository, or add to `Package.swift`:
 
 ```swift
-.package(url: "https://github.com/BlinkPayGroup/blink-kyc-ios.git", from: "1.0.0")
+.package(url: "https://github.com/BlinkPayGroup/blink-kyc-ios.git", from: "1.3.0")
 ```
 
 ### CocoaPods

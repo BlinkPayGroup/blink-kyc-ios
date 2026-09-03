@@ -235,22 +235,29 @@ extension BlinkCameraSession: AVCaptureVideoDataOutputSampleBufferDelegate {
         }
     }
 
-    /// Apple's Vision face detector → does one face fill the oval? Vision ships with iOS; the SDK
-    /// bundles no face model of its own.
+    /// Apple's Vision face detector → does one face fill the oval, and is it roughly frontal? Vision
+    /// ships with iOS; the SDK bundles no face model of its own. The landmarks request populates the
+    /// head roll/yaw used for the pose gate — the face-quality superset the web capture hints at (pose, too-close)
+    /// folds into `fit` so an off-axis or too-close face does not green the oval. A framing aid only.
     private func detectFace(in pixelBuffer: CVPixelBuffer) {
-        let request = VNDetectFaceRectanglesRequest { [weak self] request, _ in
+        let request = VNDetectFaceLandmarksRequest { [weak self] request, _ in
             guard let self else { return }
             self.faceInFlight = false
             let faces = (request.results as? [VNFaceObservation]) ?? []
             var fit = false
-            if let face = faces.first {
+            if faces.count == 1, let face = faces.first {
                 // Vision boundingBox is normalised, origin bottom-left. Centre + fill test.
                 let box = face.boundingBox
                 let cx = box.midX
                 let cy = box.midY
                 let centred = abs(cx - 0.5) < 0.22 && abs(cy - 0.5) < 0.24
                 let bigEnough = box.height > 0.34
-                fit = faces.count == 1 && centred && bigEnough
+                let tooClose = box.height > 0.9
+                // Head pose in radians (populated by the landmarks request). ~0.36 rad ≈ 20°.
+                let roll = abs(face.roll?.doubleValue ?? 0)
+                let yaw = abs(face.yaw?.doubleValue ?? 0)
+                let poseOk = roll < 0.36 && yaw < 0.42
+                fit = centred && bigEnough && !tooClose && poseOk
             }
             DispatchQueue.main.async { self.onFaceSignal?(fit) }
         }
@@ -290,6 +297,7 @@ extension BlinkCameraSession: AVCaptureVideoDataOutputSampleBufferDelegate {
         var interiorSum = 0
         var interiorN = 0
         var edgePx = 0
+        var brightPx = 0 // near-saturated interior samples → glare proxy
         for r in 0 ..< rows {
             let py = top + roiH * r / (rows - 1)
             var prev = -1
@@ -298,6 +306,7 @@ extension BlinkCameraSession: AVCaptureVideoDataOutputSampleBufferDelegate {
                 let v = lum(px, py)
                 interiorSum += v
                 interiorN += 1
+                if v >= 245 { brightPx += 1 }
                 if prev >= 0 && abs(v - prev) >= edgeStep { edgePx += 1 }
                 prev = v
             }
@@ -315,8 +324,13 @@ extension BlinkCameraSession: AVCaptureVideoDataOutputSampleBufferDelegate {
         let interiorMean = interiorN > 0 ? Double(interiorSum) / Double(interiorN) : 0
         let ringMean = ringN > 0 ? Double(ringSum) / Double(ringN) : 0
         let contrast = abs(interiorMean - ringMean)
-        let present = edgeDensity > 0.012 && contrast > 10
-        let tooFar = !present && edgeDensity >= 0.006 && edgeDensity <= 0.012
+        // Quality gates mirror the Web SDK's glare/exposure gates; they soft-gate the auto-fire
+        // (the manual shutter is never gated). Lenient — tune on real devices.
+        let glareFrac = interiorN > 0 ? Double(brightPx) / Double(interiorN) : 0
+        let glare = glareFrac > 0.12
+        let dark = interiorMean < 30 || interiorMean > 235
+        let present = edgeDensity > 0.012 && contrast > 10 && !glare && !dark
+        let tooFar = !present && !glare && !dark && edgeDensity >= 0.006 && edgeDensity <= 0.012
         return (present, tooFar)
     }
 }
